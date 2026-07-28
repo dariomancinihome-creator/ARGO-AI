@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -78,14 +79,36 @@ def _setup_comment(
     )
 
 
+def _completed_bars_only(data: pd.DataFrame, interval: str) -> pd.DataFrame:
+    """Remove the latest still-open intraday bar before confirming a setup."""
+    interval_minutes = {"1h": 60}.get(interval)
+    if interval_minutes is None or data.empty:
+        return data
+
+    last_timestamp = pd.Timestamp(data.index[-1])
+    if last_timestamp.tzinfo is None:
+        last_timestamp = last_timestamp.tz_localize("UTC")
+    else:
+        last_timestamp = last_timestamp.tz_convert("UTC")
+
+    bar_close = last_timestamp + pd.Timedelta(minutes=interval_minutes)
+    now_utc = pd.Timestamp.now(tz="UTC")
+    if bar_close > now_utc:
+        return data.iloc[:-1]
+    return data
+
+
 def analyse_asset(
     name: str,
     ticker: str,
     period: str,
     interval: str,
     support_window: int = 20,
+    closed_candles_only: bool = False,
 ) -> AssetAnalysis:
     raw = download_market_data(ticker, period, interval)
+    if closed_candles_only:
+        raw = _completed_bars_only(raw, interval)
     data = add_indicators(raw)
 
     minimum_rows = max(3, support_window + 2)
