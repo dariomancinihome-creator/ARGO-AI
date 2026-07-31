@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
 from data_loader import download_market_data
 from indicators import add_indicators, determine_trend, interpret_rsi
 from scoring import (
+    action_from_confidence,
     calculate_argo_score,
+    calculate_confidence_score,
     calculate_operability_score,
+    confidence_label,
+    operational_state,
     operability_label,
     score_label,
+    setup_progress,
 )
 
 
@@ -30,72 +34,57 @@ def _setup_comment(
     rsi: float,
     macd_positive: bool,
     volume_ratio: float,
+    confidence: int,
+    distance_resistance: float,
 ) -> str:
     macd_text = "favorevole" if macd_positive else "non favorevole"
 
     if setup == "🟢 Breakout confermato":
         return (
             f"{name} ha chiuso sopra la resistenza di {resistance:.2f}. "
-            f"Il MACD è {macd_text}, l'RSI è {rsi:.1f} e i volumi sono "
-            f"{volume_ratio:.2f} volte la media delle ultime 20 candele. "
-            "Il breakout è tecnicamente confermato. Prima di qualunque operazione "
-            "restano necessari stop, obiettivo e rischio massimo prestabilito."
+            f"MACD {macd_text}, RSI {rsi:.1f} e volumi a {volume_ratio:.2f}x "
+            f"la media. Confidence {confidence}/100: il setup è confermato, ma "
+            "l'eventuale ingresso va valutato solo dopo avere definito stop, target "
+            "e perdita massima accettabile."
         )
 
     if setup == "🟡 Breakout da verificare":
         return (
-            f"{name} ha superato la resistenza di {resistance:.2f}, ma manca una "
-            f"conferma completa: MACD {macd_text}, RSI {rsi:.1f}, volumi "
-            f"{volume_ratio:.2f} volte la media. ARGO attende una chiusura stabile "
-            "e una partecipazione dei volumi più convincente."
+            f"{name} ha superato la resistenza di {resistance:.2f}, ma la qualità "
+            f"della conferma non è ancora sufficiente. MACD {macd_text}, RSI {rsi:.1f}, "
+            f"volumi {volume_ratio:.2f}x. Perché non entrare adesso: ARGO attende una "
+            "chiusura stabile e una partecipazione dei volumi più convincente."
         )
 
     if setup == "🟡 Attendere breakout":
         return (
-            f"{name} è vicino alla resistenza di {resistance:.2f}, ma non l'ha ancora "
-            "superata con una chiusura confermata. Un semplice superamento intraday "
-            "non è sufficiente: ARGO attende chiusura sopra il livello, MACD favorevole, "
-            "RSI non eccessivo e possibilmente volumi in aumento."
+            f"{name} mantiene una struttura interessante ed è a "
+            f"{max(distance_resistance, 0):.2f}% dalla resistenza di {resistance:.2f}. "
+            "Perché non entrare adesso: il breakout non è ancora avvenuto. Il setup "
+            "potrà diventare operativo solo con chiusura sopra il livello, MACD "
+            "favorevole, RSI non eccessivo e possibilmente volumi in aumento."
         )
 
     if setup == "🟢 Pullback da monitorare":
         return (
-            f"{name} mantiene una struttura rialzista e sta ritracciando verso una "
-            "zona tecnica di breve periodo. Il setup richiede una reazione positiva; "
-            "lo stop teorico deve restare sotto un supporto identificabile."
+            f"{name} conserva una struttura rialzista e sta ritracciando verso una "
+            "zona tecnica di breve periodo. Perché non entrare subito: manca ancora "
+            "una reazione positiva leggibile. ARGO attende il recupero del momentum "
+            "prima di considerare il pullback confermato."
         )
 
     if setup == "🔴 Falso breakout":
         return (
-            f"{name} aveva superato la precedente resistenza, ma è tornato sotto "
-            f"{resistance:.2f}. La configurazione non è confermata e il rischio di "
-            "falso breakout è elevato."
+            f"{name} aveva superato una precedente resistenza, ma è tornato sotto "
+            f"{resistance:.2f}. Il setup è invalidato: il rischio di falso breakout "
+            "resta elevato e ARGO non considera opportuno inseguire il prezzo."
         )
 
     return (
-        f"Al momento {name} non presenta un setup tecnico completo. "
-        f"Supporto recente {support:.2f}, resistenza recente {resistance:.2f}. "
-        "ARGO resta in osservazione."
+        f"{name} non presenta ancora un evento operativo completo. Supporto recente "
+        f"{support:.2f}, resistenza {resistance:.2f}. Perché non entrare adesso: manca "
+        "una conferma tecnica chiara. ARGO resta in osservazione."
     )
-
-
-def _completed_bars_only(data: pd.DataFrame, interval: str) -> pd.DataFrame:
-    """Remove the latest still-open intraday bar before confirming a setup."""
-    interval_minutes = {"1h": 60}.get(interval)
-    if interval_minutes is None or data.empty:
-        return data
-
-    last_timestamp = pd.Timestamp(data.index[-1])
-    if last_timestamp.tzinfo is None:
-        last_timestamp = last_timestamp.tz_localize("UTC")
-    else:
-        last_timestamp = last_timestamp.tz_convert("UTC")
-
-    bar_close = last_timestamp + pd.Timedelta(minutes=interval_minutes)
-    now_utc = pd.Timestamp.now(tz="UTC")
-    if bar_close > now_utc:
-        return data.iloc[:-1]
-    return data
 
 
 def analyse_asset(
@@ -104,11 +93,8 @@ def analyse_asset(
     period: str,
     interval: str,
     support_window: int = 20,
-    closed_candles_only: bool = False,
 ) -> AssetAnalysis:
     raw = download_market_data(ticker, period, interval)
-    if closed_candles_only:
-        raw = _completed_bars_only(raw, interval)
     data = add_indicators(raw)
 
     minimum_rows = max(3, support_window + 2)
@@ -120,7 +106,7 @@ def analyse_asset(
 
     price = float(last["Close"])
     previous_price = float(previous["Close"])
-    daily_change = ((price / previous_price) - 1) * 100
+    candle_change = ((price / previous_price) - 1) * 100
 
     ema20 = float(last["EMA20"])
     ema50 = float(last["EMA50"])
@@ -131,17 +117,16 @@ def analyse_asset(
     atr = float(last["ATR"])
     atr_pct = (atr / price) * 100 if price else 0.0
 
-    # Il livello corrente esclude la candela in corso/ultima candela disponibile.
     prior_range = data.iloc[-(support_window + 1):-1]
     support = float(prior_range["Low"].min())
     resistance = float(prior_range["High"].max())
 
-    # Serve a riconoscere se la candela precedente aveva rotto un livello più vecchio.
     older_range = data.iloc[-(support_window + 2):-2]
     older_resistance = float(older_range["High"].max())
 
     distance_support = ((price - support) / price) * 100
     distance_resistance = ((resistance - price) / price) * 100
+    distance_ema20_pct = abs((price - ema20) / price * 100)
 
     volume_avg = float(prior_range["Volume"].tail(20).mean())
     current_volume = float(last["Volume"])
@@ -161,7 +146,7 @@ def analyse_asset(
     false_breakout = previous_price > older_resistance and price < older_resistance
     pullback_candidate = (
         bullish_structure
-        and abs((price - ema20) / price * 100) <= 2.0
+        and distance_ema20_pct <= 2.0
         and macd_positive
         and 40 <= rsi <= 65
     )
@@ -187,7 +172,7 @@ def analyse_asset(
         rsi=rsi,
         macd_line=macd_line,
         macd_signal=macd_signal,
-        daily_change=daily_change,
+        daily_change=candle_change,
         distance_support=distance_support,
         distance_resistance=distance_resistance,
     )
@@ -210,11 +195,26 @@ def analyse_asset(
         false_breakout=false_breakout,
     )
 
+    confidence = calculate_confidence_score(
+        setup=setup,
+        structure_score=structure_score,
+        operability_score=operability_score,
+        bullish_structure=bullish_structure,
+        macd_positive=macd_positive,
+        rsi=rsi,
+        volume_ratio=volume_ratio,
+        distance_resistance=distance_resistance,
+        distance_ema20_pct=distance_ema20_pct,
+    )
+    action = action_from_confidence(confidence, setup)
+    state = operational_state(setup, confidence)
+    progress = setup_progress(setup, distance_resistance, confidence)
+
     summary = {
         "Asset": name,
         "Ticker": ticker,
         "Prezzo": price,
-        "Var. %": daily_change,
+        "Var. %": candle_change,
         "RSI": rsi,
         "Stato RSI": interpret_rsi(rsi),
         "EMA 20": ema20,
@@ -234,6 +234,11 @@ def analyse_asset(
         "Operabilità": operability_score,
         "Stato operabilità": operability_label(operability_score),
         "Setup": setup,
+        "Confidence": confidence,
+        "Classe Confidence": confidence_label(confidence),
+        "Progresso setup": progress,
+        "Stato operativo": state,
+        "Azione": action,
         "Commento ARGO": _setup_comment(
             name=name,
             setup=setup,
@@ -242,6 +247,8 @@ def analyse_asset(
             rsi=rsi,
             macd_positive=macd_positive,
             volume_ratio=volume_ratio,
+            confidence=confidence,
+            distance_resistance=distance_resistance,
         ),
     }
 

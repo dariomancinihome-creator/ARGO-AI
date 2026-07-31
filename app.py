@@ -27,6 +27,10 @@ st.markdown(
     <style>
         .block-container {padding-top: 1.4rem; padding-bottom: 3rem;}
         [data-testid="stMetricValue"] {font-size: 1.55rem;}
+        .argo-hero {padding: 1.15rem 1.25rem; border: 1px solid rgba(128,128,128,.28);
+                    border-radius: 14px; margin: .25rem 0 1.25rem 0;}
+        .argo-hero h2 {margin: 0 0 .35rem 0;}
+        .argo-hero p {margin: .15rem 0; font-size: 1.02rem;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -54,8 +58,8 @@ def run_analysis(period: str, interval: str, selected_assets: tuple[str, ...]):
     report = pd.DataFrame(summaries)
     if not report.empty:
         report = report.sort_values(
-            ["Operabilità", "Score Struttura"],
-            ascending=[False, False],
+            ["Confidence", "Operabilità", "Score Struttura"],
+            ascending=[False, False, False],
         ).reset_index(drop=True)
 
     return report, histories, errors
@@ -74,10 +78,42 @@ def format_report(report: pd.DataFrame) -> pd.DataFrame:
     return formatted
 
 
-st.title("🚀 ARGO AI 2.1")
+def hero_message(report: pd.DataFrame) -> str:
+    confirmed = report[report["Stato operativo"] == "🟢 Setup confermato"]
+    if not confirmed.empty:
+        names = " · ".join(
+            f"{row['Asset']} ({int(row['Confidence'])}/100)"
+            for _, row in confirmed.head(3).iterrows()
+        )
+        return (
+            f"<div class='argo-hero'><h2>🚀 OGGI ARGO DICE</h2>"
+            f"<p><strong>{len(confirmed)} setup operativo/i confermato/i</strong></p>"
+            f"<p>{names}</p></div>"
+        )
+
+    approaching = report[report["Stato operativo"].isin([
+        "🟡 In avvicinamento", "🟠 Attendere conferma"
+    ])]
+    if not approaching.empty:
+        best = approaching.iloc[0]
+        return (
+            "<div class='argo-hero'><h2>👀 OGGI ARGO DICE</h2>"
+            "<p><strong>Nessun setup operativo confermato.</strong></p>"
+            f"<p>Il candidato più vicino è {best['Asset']}: "
+            f"{best['Stato operativo']} · Confidence {int(best['Confidence'])}/100.</p></div>"
+        )
+
+    return (
+        "<div class='argo-hero'><h2>⚪ OGGI ARGO DICE</h2>"
+        "<p><strong>Nessun setup operativo.</strong></p>"
+        "<p>La classifica resta in monitoraggio in attesa di una conferma tecnica.</p></div>"
+    )
+
+
+st.title("🚀 ARGO AI 2.2 · Decision Engine")
 st.caption(
-    "Struttura tecnica, operabilità e riconoscimento dei setup. "
-    "Le indicazioni sono informative e non costituiscono ordini di acquisto o vendita."
+    "ARGO ordina gli asset per qualità del setup, evidenzia cosa manca e indica "
+    "dove concentrare l'attenzione. Le indicazioni sono informative e non sono ordini."
 )
 
 with st.sidebar:
@@ -132,27 +168,37 @@ if report.empty:
 
 report_display = format_report(report)
 best = report.iloc[0]
+variation_label = "Var. candela %" if interval == "1h" else "Var. giorno %"
+
+st.markdown(hero_message(report), unsafe_allow_html=True)
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Capitale", f"€ {capital:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 col2.metric("Asset analizzati", len(report))
-col3.metric("Migliore operabilità", f"{int(best['Operabilità'])}/100")
+col3.metric("Migliore Confidence", f"{int(best['Confidence'])}/100")
 col4.metric("Asset in evidenza", best["Asset"])
 
 st.caption("Ultimo aggiornamento app: " + datetime.now().strftime("%d/%m/%Y · %H:%M"))
 
-st.subheader("🏆 Classifica ARGO 2.1")
+st.subheader("🏆 Classifica Decision Engine")
 ranking_columns = [
-    "Asset", "Prezzo", "Var. %", "Trend", "Score Struttura",
-    "Operabilità", "Setup", "Stato operabilità",
+    "Asset", "Prezzo", "Var. %", "Trend", "Confidence", "Azione",
+    "Stato operativo", "Progresso setup", "Score Struttura", "Operabilità", "Setup",
 ]
+ranking = report_display[ranking_columns].rename(columns={"Var. %": variation_label})
 st.dataframe(
-    report_display[ranking_columns],
+    ranking,
     use_container_width=True,
     hide_index=True,
     column_config={
         "Prezzo": st.column_config.NumberColumn("Prezzo", format="%.2f"),
-        "Var. %": st.column_config.NumberColumn("Var. %", format="%.2f%%"),
+        variation_label: st.column_config.NumberColumn(variation_label, format="%.2f%%"),
+        "Confidence": st.column_config.ProgressColumn(
+            "Confidence", min_value=0, max_value=100, format="%d"
+        ),
+        "Progresso setup": st.column_config.ProgressColumn(
+            "Avanzamento", min_value=0, max_value=100, format="%d%%"
+        ),
         "Score Struttura": st.column_config.ProgressColumn(
             "Struttura", min_value=0, max_value=100, format="%d"
         ),
@@ -162,38 +208,43 @@ st.dataframe(
     },
 )
 
-st.subheader("🎯 Analisi del setup principale")
-a, b, c, d = st.columns(4)
+st.subheader("🎯 Migliore candidato del momento")
+a, b, c, d, e = st.columns(5)
 a.metric("Asset", best["Asset"])
-b.metric("Struttura", f"{int(best['Score Struttura'])}/100")
-c.metric("Operabilità", f"{int(best['Operabilità'])}/100")
-d.metric("Setup", best["Setup"])
+b.metric("Confidence", f"{int(best['Confidence'])}/100")
+c.metric("Classe", best["Classe Confidence"])
+d.metric("Stato", best["Stato operativo"])
+e.metric("Azione", best["Azione"])
 
 left, right = st.columns(2)
 with left:
     st.write(f"**Trend:** {best['Trend']}")
+    st.write(f"**Struttura:** {int(best['Score Struttura'])}/100 · {best['Valutazione']}")
+    st.write(f"**Operabilità:** {int(best['Operabilità'])}/100 · {best['Stato operabilità']}")
+    st.write(f"**Setup:** {best['Setup']}")
+with right:
     st.write(f"**RSI:** {best['RSI']:.2f} · {best['Stato RSI']}")
     st.write(f"**MACD:** {best['Segnale MACD']}")
     st.write(f"**Volume/Media 20:** {best['Volume/Media']:.2f}x")
-with right:
-    st.write(f"**Supporto:** {best['Supporto']:.2f}")
-    st.write(f"**Resistenza:** {best['Resistenza']:.2f}")
-    st.write(f"**ATR:** {best['ATR %']:.2f}%")
     st.write(f"**Distanza resistenza:** {best['Distanza resistenza %']:.2f}%")
 
+st.progress(int(best["Progresso setup"]), text=f"Avanzamento setup: {int(best['Progresso setup'])}%")
 st.info(best["Commento ARGO"])
 st.warning(
-    "Un breakout è considerato confermato solo dopo una chiusura sopra la resistenza. "
-    "Il superamento intraday, da solo, può essere un falso segnale."
+    "ARGO 2.2 segnala un setup come confermato solo quando le condizioni tecniche "
+    "previste risultano presenti. Ingresso, stop, target e rapporto rischio/rendimento "
+    "saranno introdotti nella versione 2.3."
 )
 
 st.subheader("📈 Grafici principali")
 for _, row in report.head(top_charts).iterrows():
     name = row["Asset"]
     with st.expander(
-        f"{name} · Operabilità {int(row['Operabilità'])}/100 · {row['Setup']}",
+        f"{name} · Confidence {int(row['Confidence'])}/100 · {row['Azione']}",
         expanded=(name == best["Asset"]),
     ):
+        st.write(f"**{row['Stato operativo']} · {row['Setup']}**")
+        st.progress(int(row["Progresso setup"]), text=f"Avanzamento setup: {int(row['Progresso setup'])}%")
         st.info(row["Commento ARGO"])
         st.plotly_chart(
             price_chart(
@@ -217,7 +268,7 @@ csv_data = report_display.to_csv(index=False).encode("utf-8-sig")
 st.download_button(
     "⬇️ Scarica report CSV",
     data=csv_data,
-    file_name="report_argo_2_1.csv",
+    file_name="report_argo_2_2.csv",
     mime="text/csv",
 )
 
