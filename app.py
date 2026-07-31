@@ -57,10 +57,69 @@ def run_analysis(period: str, interval: str, selected_assets: tuple[str, ...]):
 
     report = pd.DataFrame(summaries)
     if not report.empty:
-        report = report.sort_values(
-            ["Confidence", "Operabilità", "Score Struttura"],
-            ascending=[False, False, False],
-        ).reset_index(drop=True)
+        # Compatibilità con dati prodotti da versioni precedenti del motore.
+        # Evita il blocco dell'app durante gli aggiornamenti parziali su GitHub.
+        if "Confidence" not in report.columns:
+            operability = pd.to_numeric(
+                report.get("Operabilità", pd.Series(0, index=report.index)),
+                errors="coerce",
+            ).fillna(0)
+            structure = pd.to_numeric(
+                report.get("Score Struttura", pd.Series(0, index=report.index)),
+                errors="coerce",
+            ).fillna(0)
+            setup = report.get(
+                "Setup", pd.Series("⚪ Nessun setup", index=report.index)
+            ).astype(str)
+            setup_bonus = setup.map({
+                "🟢 Breakout confermato": 24,
+                "🟢 Pullback da monitorare": 16,
+                "🟡 Breakout da verificare": 10,
+                "🟡 Attendere breakout": 6,
+                "🔴 Falso breakout": -20,
+            }).fillna(0)
+            report["Confidence"] = (
+                operability * 0.50 + structure * 0.30 + setup_bonus
+            ).clip(0, 100).round().astype(int)
+
+        if "Stato operativo" not in report.columns:
+            def _fallback_state(row):
+                setup = str(row.get("Setup", ""))
+                confidence = int(row.get("Confidence", 0))
+                if "Falso breakout" in setup:
+                    return "🔴 Setup invalidato"
+                if "Breakout confermato" in setup and confidence >= 80:
+                    return "🟢 Setup confermato"
+                if "Breakout da verificare" in setup or "Pullback" in setup:
+                    return "🟠 Attendere conferma"
+                if "Attendere breakout" in setup or confidence >= 65:
+                    return "🟡 In avvicinamento"
+                return "⚪ Nessuna opportunità"
+            report["Stato operativo"] = report.apply(_fallback_state, axis=1)
+
+        if "Azione" not in report.columns:
+            def _fallback_action(row):
+                state = str(row.get("Stato operativo", ""))
+                confidence = int(row.get("Confidence", 0))
+                if "invalidato" in state.lower():
+                    return "❌ Evita"
+                if "confermato" in state.lower() and confidence >= 85:
+                    return "🚀 Valuta ingresso"
+                if confidence >= 78:
+                    return "🟡 Preparati"
+                if confidence >= 62:
+                    return "⏳ Osserva"
+                return "⚪ Nessuna operazione"
+            report["Azione"] = report.apply(_fallback_action, axis=1)
+
+        sort_columns = [
+            column for column in ["Confidence", "Operabilità", "Score Struttura"]
+            if column in report.columns
+        ]
+        if sort_columns:
+            report = report.sort_values(
+                sort_columns, ascending=[False] * len(sort_columns)
+            ).reset_index(drop=True)
 
     return report, histories, errors
 
