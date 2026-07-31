@@ -1,24 +1,26 @@
-# ARGO AI 2.2 · Decision Engine
+# ARGO AI 3.0 Beta
 
-Dashboard Streamlit per selezione e classificazione dei setup tecnici.
+Decision engine personale in Streamlit.
 
-## Novità 2.2
+## Funzioni
+- EMA 20/50/200, RSI, MACD, ATR, supporti e resistenze
+- Confidence, Conviction e Indice Qualità Setup (IQS)
+- identificazione breakout, pullback e falsi breakout
+- piano operativo long per breakout confermati
+- Entry, Stop Loss, TP1, TP2, R/R e dimensionamento teorico della posizione
+- comando **ENTRA** soltanto quando tutti i filtri Beta risultano validi
 
-- nuovo Confidence Score orientato alla qualità del setup
-- ranking ordinato per Confidence, operabilità e struttura
-- sezione iniziale “OGGI ARGO DICE”
-- nuova colonna Azione
-- cinque stati operativi inequivocabili
-- indicatore percentuale di avanzamento del setup
-- commenti “Perché non entrare adesso?”
-- etichetta dinamica della variazione per timeframe giornaliero/orario
-- classificazione più leggibile dell’operabilità
-- predisposizione logica per piano operativo e notifiche future
+## Regole del piano Beta
+- Entry: chiusura della candela di breakout
+- Stop: sotto minimo candela/livello rotto con buffer 0,5 ATR
+- TP1: 2R
+- TP2: resistenza superiore utile (almeno 2,5R), altrimenti 3R
+- autorizzazione: Confidence >= 90, volume >= 1,05x, RSI 50-72, stop coerente, R/R >= 2
 
-## Aggiornamento
+## Avvio
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
 
-Caricare tutti i file del pacchetto nella cartella principale del repository GitHub e confermare il commit. Streamlit aggiornerà automaticamente l’app.
-
-## Avvertenza
-
-ARGO AI è uno strumento informativo e sperimentale. Non costituisce consulenza finanziaria né un ordine di acquisto o vendita.
+Strumento sperimentale e informativo; non costituisce consulenza finanziaria né ordine di investimento.

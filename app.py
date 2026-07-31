@@ -128,7 +128,7 @@ def format_report(report: pd.DataFrame) -> pd.DataFrame:
     formatted = report.copy()
     decimals = [
         "Prezzo", "Var. %", "RSI", "EMA 20", "EMA 50", "EMA 200",
-        "MACD", "ATR %", "Supporto", "Resistenza",
+        "MACD", "ATR %", "Supporto", "Resistenza", "Entry", "Stop Loss", "TP1", "TP2", "R/R TP1", "R/R TP2", "Rischio/unità",
         "Distanza supporto %", "Distanza resistenza %", "Volume/Media",
     ]
     for column in decimals:
@@ -169,10 +169,10 @@ def hero_message(report: pd.DataFrame) -> str:
     )
 
 
-st.title("🚀 ARGO AI 2.2 · Decision Engine")
+st.title("🚀 ARGO AI 3.0 Beta · Trading Plan")
 st.caption(
-    "ARGO ordina gli asset per qualità del setup, evidenzia cosa manca e indica "
-    "dove concentrare l'attenzione. Le indicazioni sono informative e non sono ordini."
+    "ARGO seleziona i setup, calcola Entry, Stop Loss, TP1, TP2 e rapporto rischio/rendimento. "
+    "Il comando ENTRA appare solo quando tutte le regole tecniche della Beta risultano valide. Le indicazioni sono informative e non sono ordini."
 )
 
 with st.sidebar:
@@ -199,6 +199,10 @@ with st.sidebar:
         min_value=1,
         max_value=min(6, max(1, len(selected_assets))),
         value=min(TOP_CHARTS_DEFAULT, max(1, len(selected_assets))),
+    )
+    risk_pct = st.number_input(
+        "Rischio massimo per operazione (%)", min_value=0.1, max_value=5.0,
+        value=1.0, step=0.1,
     )
     refresh = st.button("🔄 Aggiorna analisi", use_container_width=True, type="primary")
 
@@ -241,8 +245,8 @@ st.caption("Ultimo aggiornamento app: " + datetime.now().strftime("%d/%m/%Y · %
 
 st.subheader("🏆 Classifica Decision Engine")
 ranking_columns = [
-    "Asset", "Prezzo", "Var. %", "Trend", "Confidence", "Azione",
-    "Stato operativo", "Progresso setup", "Score Struttura", "Operabilità", "Setup",
+    "Asset", "Prezzo", "Var. %", "Trend", "Confidence", "Conviction", "IQS", "Azione",
+    "Entry", "Stop Loss", "TP1", "TP2", "R/R TP1", "Stato operativo", "Progresso setup", "Setup",
 ]
 ranking = report_display[ranking_columns].rename(columns={"Var. %": variation_label})
 st.dataframe(
@@ -268,12 +272,13 @@ st.dataframe(
 )
 
 st.subheader("🎯 Migliore candidato del momento")
-a, b, c, d, e = st.columns(5)
+a, b, c, d, e, f = st.columns(6)
 a.metric("Asset", best["Asset"])
 b.metric("Confidence", f"{int(best['Confidence'])}/100")
 c.metric("Classe", best["Classe Confidence"])
 d.metric("Stato", best["Stato operativo"])
 e.metric("Azione", best["Azione"])
+f.metric("IQS", best["IQS"])
 
 left, right = st.columns(2)
 with left:
@@ -289,11 +294,24 @@ with right:
 
 st.progress(int(best["Progresso setup"]), text=f"Avanzamento setup: {int(best['Progresso setup'])}%")
 st.info(best["Commento ARGO"])
-st.warning(
-    "ARGO 2.2 segnala un setup come confermato solo quando le condizioni tecniche "
-    "previste risultano presenti. Ingresso, stop, target e rapporto rischio/rendimento "
-    "saranno introdotti nella versione 2.3."
-)
+
+st.subheader("🧭 Piano operativo")
+if bool(best.get("Piano valido", False)):
+    p1, p2, p3, p4, p5 = st.columns(5)
+    p1.metric("Entry", f"{best['Entry']:.4f}")
+    p2.metric("Stop Loss", f"{best['Stop Loss']:.4f}")
+    p3.metric("TP1", f"{best['TP1']:.4f}")
+    p4.metric("TP2", f"{best['TP2']:.4f}")
+    p5.metric("R/R TP1", f"{best['R/R TP1']:.2f}")
+    risk_amount = capital * risk_pct / 100
+    units = risk_amount / float(best["Rischio/unità"]) if float(best["Rischio/unità"]) > 0 else 0
+    st.success(
+        f"🚀 ENTRA — piano tecnico validato. Con rischio {risk_pct:.1f}% su € {capital:,.2f}, "
+        f"rischio monetario € {risk_amount:,.2f} e quantità teorica {units:.4f} unità."
+    )
+else:
+    st.warning(best.get("Esito piano", "Nessun piano operativo validato."))
+    st.caption("ARGO non mostra ENTRA finché breakout, Confidence, volume, RSI, stop tecnico e R/R non superano tutti i filtri.")
 
 st.subheader("📈 Grafici principali")
 for _, row in report.head(top_charts).iterrows():
@@ -312,6 +330,10 @@ for _, row in report.head(top_charts).iterrows():
                 score=int(row["Score Struttura"]),
                 support=float(row["Supporto"]),
                 resistance=float(row["Resistenza"]),
+                entry=float(row["Entry"]) if pd.notna(row.get("Entry")) else None,
+                stop_loss=float(row["Stop Loss"]) if pd.notna(row.get("Stop Loss")) else None,
+                tp1=float(row["TP1"]) if pd.notna(row.get("TP1")) else None,
+                tp2=float(row["TP2"]) if pd.notna(row.get("TP2")) else None,
             ),
             use_container_width=True,
         )
@@ -327,7 +349,7 @@ csv_data = report_display.to_csv(index=False).encode("utf-8-sig")
 st.download_button(
     "⬇️ Scarica report CSV",
     data=csv_data,
-    file_name="report_argo_2_2.csv",
+    file_name="report_argo_3_0_beta.csv",
     mime="text/csv",
 )
 

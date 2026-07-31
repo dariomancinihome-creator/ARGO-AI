@@ -6,6 +6,7 @@ import pandas as pd
 
 from data_loader import download_market_data
 from indicators import add_indicators, determine_trend, interpret_rsi
+from trade_engine import build_long_trade_plan
 from scoring import (
     action_from_confidence,
     calculate_argo_score,
@@ -124,6 +125,10 @@ def analyse_asset(
     older_range = data.iloc[-(support_window + 2):-2]
     older_resistance = float(older_range["High"].max())
 
+    strategic_range = data.iloc[-min(len(data), 80):-1]
+    higher_levels = strategic_range.loc[strategic_range["High"] > price, "High"]
+    next_resistance = float(higher_levels.min()) if not higher_levels.empty else None
+
     distance_support = ((price - support) / price) * 100
     distance_resistance = ((resistance - price) / price) * 100
     distance_ema20_pct = abs((price - ema20) / price * 100)
@@ -206,9 +211,33 @@ def analyse_asset(
         distance_resistance=distance_resistance,
         distance_ema20_pct=distance_ema20_pct,
     )
-    action = action_from_confidence(confidence, setup)
-    state = operational_state(setup, confidence)
+    plan = build_long_trade_plan(
+        setup=setup,
+        confidence=confidence,
+        close=price,
+        candle_low=float(last["Low"]),
+        atr=atr,
+        breakout_level=resistance,
+        next_resistance=next_resistance,
+        volume_ratio=volume_ratio,
+        rsi=rsi,
+    )
+
+    action = "🚀 ENTRA" if plan.valid else action_from_confidence(confidence, setup)
+    state = "🟢 Piano operativo validato" if plan.valid else operational_state(setup, confidence)
     progress = setup_progress(setup, distance_resistance, confidence)
+    conviction = max(1, min(5, round(confidence / 20)))
+    conviction_stars = "★" * conviction + "☆" * (5 - conviction)
+    if plan.valid and confidence >= 95:
+        setup_quality = "A+"
+    elif setup == "🟢 Breakout confermato" and confidence >= 85:
+        setup_quality = "A"
+    elif confidence >= 75:
+        setup_quality = "B+"
+    elif confidence >= 65:
+        setup_quality = "B"
+    else:
+        setup_quality = "C"
 
     summary = {
         "Asset": name,
@@ -239,6 +268,18 @@ def analyse_asset(
         "Progresso setup": progress,
         "Stato operativo": state,
         "Azione": action,
+        "Conviction": conviction_stars,
+        "IQS": setup_quality,
+        "Direzione": plan.direction if plan.entry is not None else "—",
+        "Entry": plan.entry,
+        "Stop Loss": plan.stop_loss,
+        "TP1": plan.tp1,
+        "TP2": plan.tp2,
+        "R/R TP1": plan.rr1,
+        "R/R TP2": plan.rr2,
+        "Rischio/unità": plan.risk_per_unit,
+        "Piano valido": plan.valid,
+        "Esito piano": plan.reason,
         "Commento ARGO": _setup_comment(
             name=name,
             setup=setup,

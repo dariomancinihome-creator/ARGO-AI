@@ -10,6 +10,10 @@ def price_chart(
     score: int,
     support: float | None = None,
     resistance: float | None = None,
+    entry: float | None = None,
+    stop_loss: float | None = None,
+    tp1: float | None = None,
+    tp2: float | None = None,
     rows: int = 180,
 ) -> go.Figure:
     chart_data = data.tail(rows)
@@ -33,6 +37,14 @@ def price_chart(
         fig.add_hline(y=support, line_dash="dot", annotation_text="Supporto")
     if resistance is not None:
         fig.add_hline(y=resistance, line_dash="dot", annotation_text="Resistenza")
+    if entry is not None:
+        fig.add_hline(y=entry, line_dash="dash", annotation_text="Entry")
+    if stop_loss is not None:
+        fig.add_hline(y=stop_loss, line_dash="dash", annotation_text="Stop Loss")
+    if tp1 is not None:
+        fig.add_hline(y=tp1, line_dash="dash", annotation_text="TP1")
+    if tp2 is not None:
+        fig.add_hline(y=tp2, line_dash="dash", annotation_text="TP2")
 
     fig.update_layout(
         title=f"{asset_name} · Struttura {score}/100",
