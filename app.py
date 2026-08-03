@@ -7,6 +7,7 @@ import streamlit as st
 
 from analysis_engine import analyse_asset
 from charts import price_chart, rsi_chart
+from utils import format_report, to_number
 from config import (
     APP_ICON,
     APP_TITLE,
@@ -124,18 +125,6 @@ def run_analysis(period: str, interval: str, selected_assets: tuple[str, ...]):
     return report, histories, errors
 
 
-def format_report(report: pd.DataFrame) -> pd.DataFrame:
-    formatted = report.copy()
-    decimals = [
-        "Prezzo", "Var. %", "RSI", "EMA 20", "EMA 50", "EMA 200",
-        "MACD", "ATR %", "Supporto", "Resistenza", "Entry", "Stop Loss", "TP1", "TP2", "R/R TP1", "R/R TP2", "Rischio/unità",
-        "Distanza supporto %", "Distanza resistenza %", "Volume/Media",
-    ]
-    for column in decimals:
-        if column in formatted.columns:
-            formatted[column] = formatted[column].round(2)
-    return formatted
-
 
 def hero_message(report: pd.DataFrame) -> str:
     confirmed = report[report["Stato operativo"] == "🟢 Setup confermato"]
@@ -169,7 +158,7 @@ def hero_message(report: pd.DataFrame) -> str:
     )
 
 
-st.title("🚀 ARGO AI 3.0 Beta · Trading Plan")
+st.title("🚀 ARGO AI 3.0 RC · Trading Plan")
 st.caption(
     "ARGO seleziona i setup, calcola Entry, Stop Loss, TP1, TP2 e rapporto rischio/rendimento. "
     "Il comando ENTRA appare solo quando tutte le regole tecniche della Beta risultano valide. Le indicazioni sono informative e non sono ordini."
@@ -296,7 +285,7 @@ st.progress(int(best["Progresso setup"]), text=f"Avanzamento setup: {int(best['P
 st.info(best["Commento ARGO"])
 
 st.subheader("🧭 Piano operativo")
-if bool(best.get("Piano valido", False)):
+if str(best.get("Piano valido", False)).lower() in {"true", "1", "yes"}:
     p1, p2, p3, p4, p5 = st.columns(5)
     p1.metric("Entry", f"{best['Entry']:.4f}")
     p2.metric("Stop Loss", f"{best['Stop Loss']:.4f}")
@@ -304,7 +293,8 @@ if bool(best.get("Piano valido", False)):
     p4.metric("TP2", f"{best['TP2']:.4f}")
     p5.metric("R/R TP1", f"{best['R/R TP1']:.2f}")
     risk_amount = capital * risk_pct / 100
-    units = risk_amount / float(best["Rischio/unità"]) if float(best["Rischio/unità"]) > 0 else 0
+    risk_per_unit = to_number(best.get("Rischio/unità"), 0.0) or 0.0
+    units = risk_amount / risk_per_unit if risk_per_unit > 0 else 0.0
     st.success(
         f"🚀 ENTRA — piano tecnico validato. Con rischio {risk_pct:.1f}% su € {capital:,.2f}, "
         f"rischio monetario € {risk_amount:,.2f} e quantità teorica {units:.4f} unità."
@@ -330,10 +320,10 @@ for _, row in report.head(top_charts).iterrows():
                 score=int(row["Score Struttura"]),
                 support=float(row["Supporto"]),
                 resistance=float(row["Resistenza"]),
-                entry=float(row["Entry"]) if pd.notna(row.get("Entry")) else None,
-                stop_loss=float(row["Stop Loss"]) if pd.notna(row.get("Stop Loss")) else None,
-                tp1=float(row["TP1"]) if pd.notna(row.get("TP1")) else None,
-                tp2=float(row["TP2"]) if pd.notna(row.get("TP2")) else None,
+                entry=to_number(row.get("Entry")),
+                stop_loss=to_number(row.get("Stop Loss")),
+                tp1=to_number(row.get("TP1")),
+                tp2=to_number(row.get("TP2")),
             ),
             use_container_width=True,
         )
@@ -349,7 +339,7 @@ csv_data = report_display.to_csv(index=False).encode("utf-8-sig")
 st.download_button(
     "⬇️ Scarica report CSV",
     data=csv_data,
-    file_name="report_argo_3_0_beta.csv",
+    file_name="report_argo_3_0_rc.csv",
     mime="text/csv",
 )
 
