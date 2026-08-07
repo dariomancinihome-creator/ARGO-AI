@@ -8,7 +8,7 @@ import streamlit as st
 from analysis_engine import analyse_asset
 from charts import price_chart, rsi_chart
 from utils import format_report, to_number
-from trade_manager import add_trade, close_trade, load_trades, trade_snapshot
+from trade_manager import add_trade, close_trade, load_trades, trade_snapshot, storage_backend
 from config import (
     APP_ICON,
     APP_TITLE,
@@ -23,6 +23,34 @@ from config import (
 )
 
 st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON, layout="wide")
+
+
+def _check_app_password() -> bool:
+    """Protezione semplice per evitare che un'app pubblica esponga il Trade Manager."""
+    try:
+        expected = st.secrets.get("ARGO_APP_PASSWORD")
+    except Exception:
+        expected = None
+
+    if not expected:
+        return True
+
+    if st.session_state.get("argo_authenticated") is True:
+        return True
+
+    st.title("🔐 ARGO AI")
+    password = st.text_input("Password", type="password")
+    if st.button("Accedi", type="primary"):
+        if password == expected:
+            st.session_state["argo_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Password non corretta.")
+    return False
+
+
+if not _check_app_password():
+    st.stop()
 
 st.markdown(
     """
@@ -307,6 +335,7 @@ else:
 st.divider()
 st.subheader("💼 ARGO Trade Manager")
 st.caption("Le operazioni seguite restano separate dallo Scanner: se un asset esce dalla classifica, il trade continua a essere mostrato qui.")
+st.caption(f"Archivio Trade Manager: **{storage_backend()}**")
 
 open_trades = [t for t in load_trades() if t.get("status") == "OPEN"]
 if open_trades:
