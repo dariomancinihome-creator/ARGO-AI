@@ -64,3 +64,11 @@ class TradePlanTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TradeManagerTests(unittest.TestCase):
+    def test_snapshot_profit_and_tp(self):
+        from trade_manager import trade_snapshot
+        trade={"entry":100,"stop_loss":95,"tp1":110,"tp2":120}
+        snap=trade_snapshot(trade,111)
+        self.assertGreater(snap["pnl_pct"],10)
+        self.assertIn("TP1",snap["state"])

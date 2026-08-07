@@ -8,6 +8,7 @@ import streamlit as st
 from analysis_engine import analyse_asset
 from charts import price_chart, rsi_chart
 from utils import format_report, to_number
+from trade_manager import add_trade, close_trade, load_trades, trade_snapshot
 from config import (
     APP_ICON,
     APP_TITLE,
@@ -158,7 +159,7 @@ def hero_message(report: pd.DataFrame) -> str:
     )
 
 
-st.title("🚀 ARGO AI 3.0 RC · Trading Plan")
+st.title("🚀 ARGO AI 3.1 · Trade Manager")
 st.caption(
     "ARGO seleziona i setup, calcola Entry, Stop Loss, TP1, TP2 e rapporto rischio/rendimento. "
     "Il comando ENTRA appare solo quando tutte le regole tecniche della Beta risultano valide. Le indicazioni sono informative e non sono ordini."
@@ -303,6 +304,76 @@ else:
     st.warning(best.get("Esito piano", "Nessun piano operativo validato."))
     st.caption("ARGO non mostra ENTRA finché breakout, Confidence, volume, RSI, stop tecnico e R/R non superano tutti i filtri.")
 
+st.divider()
+st.subheader("💼 ARGO Trade Manager")
+st.caption("Le operazioni seguite restano separate dallo Scanner: se un asset esce dalla classifica, il trade continua a essere mostrato qui.")
+
+open_trades = [t for t in load_trades() if t.get("status") == "OPEN"]
+if open_trades:
+    current_prices = {str(r["Asset"]): float(r["Prezzo"]) for _, r in report.iterrows()}
+    for trade in open_trades:
+        asset = trade["asset"]
+        current = current_prices.get(asset)
+        with st.container(border=True):
+            st.markdown(f"### {asset} · {trade.get('direction', 'LONG')}")
+            if current is None:
+                st.warning("Prezzo corrente non disponibile: includi questo asset nella watchlist per aggiornarne il monitoraggio.")
+                current = float(trade["entry"])
+            snap = trade_snapshot(trade, current)
+            c1,c2,c3,c4,c5 = st.columns(5)
+            c1.metric("Entry", f"{float(trade['entry']):.2f}")
+            c2.metric("Prezzo", f"{current:.2f}", f"{snap['pnl_pct']:+.2f}%")
+            c3.metric("Stop", "—" if trade.get("stop_loss") is None else f"{float(trade['stop_loss']):.2f}")
+            c4.metric("TP1", "—" if trade.get("tp1") is None else f"{float(trade['tp1']):.2f}")
+            c5.metric("TP2", "—" if trade.get("tp2") is None else f"{float(trade['tp2']):.2f}")
+            st.write(f"**{snap['state']}** · {snap['action']}")
+            d=[]
+            if snap['distance_sl'] is not None: d.append(f"SL {snap['distance_sl']:+.2f}%")
+            if snap['distance_tp1'] is not None: d.append(f"TP1 {snap['distance_tp1']:+.2f}%")
+            if snap['distance_tp2'] is not None: d.append(f"TP2 {snap['distance_tp2']:+.2f}%")
+            if d: st.caption("Distanza dal prezzo attuale: " + " · ".join(d))
+            with st.expander("Chiudi operazione"):
+                exit_price = st.number_input("Prezzo di uscita", min_value=0.0001, value=float(current), key=f"exit_{trade['id']}")
+                if st.button("Conferma chiusura", key=f"close_{trade['id']}"):
+                    close_trade(trade["id"], exit_price)
+                    st.rerun()
+else:
+    st.info("Nessuna operazione aperta nel Trade Manager.")
+
+with st.expander("➕ Segui una nuova operazione", expanded=False):
+    asset_options = list(WATCHLIST.keys())
+    default_idx = asset_options.index(str(best["Asset"])) if str(best["Asset"]) in asset_options else 0
+    track_asset = st.selectbox("Asset", asset_options, index=default_idx, key="track_asset")
+    source = report[report["Asset"] == track_asset]
+    source_row = source.iloc[0] if not source.empty else None
+    suggested_entry = to_number(source_row.get("Entry")) if source_row is not None else None
+    if suggested_entry is None and source_row is not None: suggested_entry = to_number(source_row.get("Prezzo"))
+    entry_value = st.number_input("Prezzo effettivo di ingresso", min_value=0.0001, value=float(suggested_entry or 1.0), format="%.4f")
+    m1,m2,m3 = st.columns(3)
+    with m1:
+        sl_value = st.number_input("Stop Loss (0 = non impostato)", min_value=0.0, value=float(to_number(source_row.get("Stop Loss"),0.0) if source_row is not None else 0.0), format="%.4f")
+    with m2:
+        tp1_value = st.number_input("TP1 (0 = non impostato)", min_value=0.0, value=float(to_number(source_row.get("TP1"),0.0) if source_row is not None else 0.0), format="%.4f")
+    with m3:
+        tp2_value = st.number_input("TP2 (0 = non impostato)", min_value=0.0, value=float(to_number(source_row.get("TP2"),0.0) if source_row is not None else 0.0), format="%.4f")
+    setup_value = str(source_row.get("Setup", "Inserimento manuale")) if source_row is not None else "Inserimento manuale"
+    if st.button("📌 Segui operazione", type="primary"):
+        add_trade(asset=track_asset, ticker=WATCHLIST[track_asset], entry=entry_value,
+                  stop_loss=sl_value or None, tp1=tp1_value or None, tp2=tp2_value or None,
+                  setup=setup_value)
+        st.success(f"{track_asset} aggiunto al Trade Manager.")
+        st.rerun()
+
+closed_trades = [t for t in load_trades() if t.get("status") == "CLOSED"]
+if closed_trades:
+    with st.expander(f"📚 Storico operazioni ({len(closed_trades)})"):
+        history_rows=[]
+        for t in reversed(closed_trades):
+            entry=float(t['entry']); exit_p=float(t.get('exit_price') or entry)
+            history_rows.append({"Asset":t['asset'],"Apertura":t.get('opened_at'),"Chiusura":t.get('closed_at'),
+                                 "Entry":entry,"Exit":exit_p,"P/L %":round((exit_p/entry-1)*100,2),"Setup":t.get('setup','')})
+        st.dataframe(pd.DataFrame(history_rows), use_container_width=True, hide_index=True)
+
 st.subheader("📈 Grafici principali")
 for _, row in report.head(top_charts).iterrows():
     name = row["Asset"]
@@ -339,7 +410,7 @@ csv_data = report_display.to_csv(index=False).encode("utf-8-sig")
 st.download_button(
     "⬇️ Scarica report CSV",
     data=csv_data,
-    file_name="report_argo_3_0_rc.csv",
+    file_name="report_argo_3_1.csv",
     mime="text/csv",
 )
 
