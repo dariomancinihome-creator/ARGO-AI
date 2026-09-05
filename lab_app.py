@@ -1,45 +1,117 @@
 import streamlit as st
-from argo4_backtester import UNIVERSE,run_dna
+from argo4_backtester import UNIVERSE, run_validation
 
-st.set_page_config(page_title="ARGO 4.0 Test 3",page_icon="🧬",layout="wide")
-st.title("🧬 ARGO 4.0 — Test 3: DNA degli incroci")
-st.caption("Cerchiamo dove nascono gli errori senza aggiungere altri indicatori.")
+st.set_page_config(
+    page_title="ARGO 4.0 Test 4",
+    page_icon="🏁",
+    layout="wide"
+)
+
+st.title("🏁 ARGO 4.0 — Test 4: validazione 70/30")
+st.caption(
+    "Il primo 70% cronologico scopre il DNA. "
+    "L'ultimo 30% lo verifica senza modificare le regole."
+)
 
 with st.sidebar:
-    defaults=["Gold","Nasdaq 100","Bitcoin","NVIDIA","Tesla","Amazon","EUR/USD","GBP/USD"]
-    selected=st.multiselect("Asset",list(UNIVERSE),default=defaults)
-    run=st.button("▶ ESEGUI TEST 3",type="primary",use_container_width=True)
+    defaults = [
+        "Gold","Nasdaq 100","Bitcoin","NVIDIA",
+        "Tesla","Amazon","EUR/USD","GBP/USD"
+    ]
 
-if not run: st.info("Premi ESEGUI TEST 3."); st.stop()
-if not selected: st.warning("Seleziona almeno un asset."); st.stop()
+    selected = st.multiselect(
+        "Asset",
+        list(UNIVERSE),
+        default=defaults
+    )
 
-with st.spinner("Analizzo il DNA di ogni incrocio M15..."):
-    events,zones,hours,errors=run_dna(selected)
+    st.markdown("**Training:** primo 70%")
+    st.markdown("**Out-of-sample:** ultimo 30%")
+
+    run = st.button(
+        "▶ ESEGUI TEST 4",
+        type="primary",
+        use_container_width=True
+    )
+
+if not run:
+    st.info("Premi ESEGUI TEST 4.")
+    st.stop()
+
+if not selected:
+    st.warning("Seleziona almeno un asset.")
+    st.stop()
+
+with st.spinner(
+    "Scarico M15, scopro le regole sul 70% e le provo sul 30%..."
+):
+    events, train, test, validated, errors = run_validation(selected)
 
 if errors:
     with st.expander("Note download"):
-        for e in errors: st.write("•",e)
-if events.empty: st.error("Nessun dato."); st.stop()
+        for error in errors:
+            st.write("•", error)
 
-st.metric("Incroci analizzati",f"{len(events):,}")
+if validated.empty:
+    st.error("Nessuna regola validabile trovata.")
+    st.stop()
 
-st.subheader("1. Zone Stochastic")
-z=zones[zones["Signals"]>=5].sort_values(["Error15 %","Signals"],ascending=[True,False])
-st.dataframe(z.style.format({"Signals/day":"{:.2f}","Win15 %":"{:.1f}","Error15 %":"{:.1f}",
-                             "Win30 %":"{:.1f}","Error30 %":"{:.1f}","Move15_pct":"{:.3f}",
-                             "Median_ADX":"{:.1f}","Median_ATR_pct":"{:.3f}"}),
-             use_container_width=True,height=620)
+stable = validated[validated["Stable"] == True]
 
-st.subheader("2. Fasce orarie")
-hh=hours[hours["Signals"]>=5].sort_values(["Error15 %","Signals"],ascending=[True,False])
-st.dataframe(hh,use_container_width=True,height=500)
+c1, c2, c3, c4 = st.columns(4)
 
-st.subheader("3. Tutti gli incroci — dataset DNA")
-st.dataframe(events,use_container_width=True,height=500)
+c1.metric("Incroci totali", len(events))
+c2.metric("Training", len(train))
+c3.metric("Out-of-sample", len(test))
+c4.metric("Regole stabili", len(stable))
 
-c1,c2,c3=st.columns(3)
-c1.download_button("⬇ EVENTI DNA",events.to_csv(index=False).encode(),"argo4_test3_events.csv","text/csv",use_container_width=True)
-c2.download_button("⬇ ZONE STOCH",zones.to_csv(index=False).encode(),"argo4_test3_zones.csv","text/csv",use_container_width=True)
-c3.download_button("⬇ ORARI",hours.to_csv(index=False).encode(),"argo4_test3_hours.csv","text/csv",use_container_width=True)
+st.subheader("🏆 DNA che ha retto fuori campione")
 
-st.caption("Win/Error misurano solo la direzione a +15/+30m. Costi, spread e slippage non inclusi.")
+display_cols = [
+    "Asset","Stoch","Direction","K zone","EMA state",
+    "Train signals","Train Win15 %","Test signals","Test Win15 %",
+    "Train Win30 %","Test Win30 %","Win15 degradation pp",
+    "Stable","Validation score"
+]
+
+st.dataframe(
+    stable[display_cols].style.format({
+        "Train Win15 %":"{:.1f}",
+        "Test Win15 %":"{:.1f}",
+        "Train Win30 %":"{:.1f}",
+        "Test Win30 %":"{:.1f}",
+        "Win15 degradation pp":"{:.1f}",
+        "Validation score":"{:.1f}",
+    }),
+    use_container_width=True,
+    height=550
+)
+
+st.subheader("Tutte le regole scoperte")
+
+st.dataframe(
+    validated[display_cols].style.format({
+        "Train Win15 %":"{:.1f}",
+        "Test Win15 %":"{:.1f}",
+        "Train Win30 %":"{:.1f}",
+        "Test Win30 %":"{:.1f}",
+        "Win15 degradation pp":"{:.1f}",
+        "Validation score":"{:.1f}",
+    }),
+    use_container_width=True,
+    height=650
+)
+
+st.download_button(
+    "⬇ Scarica validazione CSV",
+    validated.to_csv(index=False).encode("utf-8"),
+    "argo4_test4_validation.csv",
+    "text/csv",
+    use_container_width=True,
+)
+
+st.caption(
+    "Una regola è marcata Stable se ha campione test sufficiente, "
+    "Win15 out-of-sample ≥55% e degrado rispetto al training ≤12 punti percentuali. "
+    "Spread, slippage, leva e costi non sono inclusi."
+)
