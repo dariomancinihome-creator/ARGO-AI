@@ -1,69 +1,62 @@
 import streamlit as st
-import pandas as pd
-from argo4_backtester import UNIVERSE, run_lab
+from argo4_backtester import UNIVERSE,run_lab,filter_impact
 
-st.set_page_config(page_title="ARGO 4.0 Lab", page_icon="🧪", layout="wide")
-st.title("🧪 ARGO 4.0 — Laboratorio M15")
-st.caption("22 sessioni circa / ultimo mese disponibile. Il laboratorio misura i segnali; non invia ordini.")
+st.set_page_config(page_title="ARGO 4.0 Test 2",page_icon="🧬",layout="wide")
+st.title("🧬 ARGO 4.0 — Test 2: chirurgia dei filtri")
+st.caption("Obiettivo: misurare quanto errore elimina ogni filtro e quanti segnali sacrifica.")
 
 with st.sidebar:
-    st.header("Universo")
-    defaults = ["Gold","Nasdaq 100","Bitcoin","NVIDIA","Tesla","Amazon","EUR/USD","GBP/USD"]
-    selected = st.multiselect("Asset da testare", list(UNIVERSE), default=defaults)
-    st.markdown("**Strategie in gara:** 5-3-3 · 8-3-3 · 10-5-5")
-    st.markdown("Filtro: EMA 9/21 + ADX14 crescente + ATR relativo")
-    run = st.button("▶ ESEGUI LABORATORIO", type="primary", use_container_width=True)
+    defaults=["Gold","Nasdaq 100","Bitcoin","NVIDIA","Tesla","Amazon","EUR/USD","GBP/USD"]
+    selected=st.multiselect("Asset da testare",list(UNIVERSE),default=defaults)
+    st.markdown("**Livelli:** Stoch → +EMA → +ADX → +ATR")
+    run=st.button("▶ ESEGUI TEST 2",type="primary",use_container_width=True)
 
 if not run:
-    st.info("Seleziona gli asset e premi ESEGUI LABORATORIO.")
+    st.info("Premi ESEGUI TEST 2.")
     st.stop()
-
 if not selected:
-    st.warning("Seleziona almeno un asset.")
-    st.stop()
+    st.warning("Seleziona almeno un asset."); st.stop()
 
-with st.spinner("Scarico M15 e processo tutte le configurazioni..."):
-    result, errors, raw = run_lab(selected)
+with st.spinner("Backtest M15 incrementale in corso..."):
+    result,errors=run_lab(selected)
+impact=filter_impact(result)
 
 if errors:
-    with st.expander("Download non riusciti / note"):
-        for e in errors:
-            st.write("•", e)
-
+    with st.expander("Note download"):
+        for e in errors: st.write("•",e)
 if result.empty:
-    st.error("Nessun risultato disponibile.")
-    st.stop()
+    st.error("Nessun risultato."); st.stop()
 
-best = result.iloc[0]
-c1,c2,c3,c4 = st.columns(4)
-c1.metric("Miglior asset", best["Asset"])
-c2.metric("Configurazione", best["Stoch"])
-c3.metric("Win 15m", f'{best["Win15 %"]:.1f}%')
-c4.metric("Segnali/giorno", f'{best["Signals/day"]:.1f}')
+# Focus on rows with a minimally useful sample.
+robust=result[result["Signals"]>=10]
+best=(robust.iloc[0] if not robust.empty else result.iloc[0])
+a,b,c,d=st.columns(4)
+a.metric("Asset",best["Asset"])
+b.metric("Setup",f'{best["Stoch"]} {best["Direction"]}')
+c.metric("Errore 15m",f'{best["Error15 %"]:.1f}%')
+d.metric("Segnali/giorno",f'{best["Signals/day"]:.2f}')
 
-st.subheader("🏆 Classifica quantitativa")
-show_cols = ["Asset","Stoch","Direction","Mode","Signals","Signals/day","Win15 %","Win30 %",
-             "Move15 %","Move30 %","Median ADX","Median ATR %","Best Stoch zone","Lab Score"]
-st.dataframe(
-    result[show_cols].style.format({
-        "Signals/day":"{:.2f}","Win15 %":"{:.1f}","Win30 %":"{:.1f}",
-        "Move15 %":"{:.3f}","Move30 %":"{:.3f}",
-        "Median ADX":"{:.1f}","Median ATR %":"{:.3f}","Lab Score":"{:.1f}"
-    }),
-    use_container_width=True, height=620
-)
+st.subheader("1. Frontiera frequenza / errore")
+cols=["Asset","Stoch","Direction","Filter level","Signals","Signals/day",
+      "Win15 %","Error15 %","Win30 %","Error30 %","Signals retained %","Signals removed %",
+      "Move15 %","Move30 %","Efficiency score"]
+st.dataframe(result[cols].style.format({
+    "Signals/day":"{:.2f}","Win15 %":"{:.1f}","Error15 %":"{:.1f}",
+    "Win30 %":"{:.1f}","Error30 %":"{:.1f}","Signals retained %":"{:.1f}",
+    "Signals removed %":"{:.1f}","Move15 %":"{:.3f}","Move30 %":"{:.3f}",
+    "Efficiency score":"{:.1f}"
+}),use_container_width=True,height=650)
 
-st.subheader("Top 10 — filtro completo")
-filtered = result[result["Mode"] == "+ EMA/ADX/ATR"].head(10)
-st.dataframe(filtered[show_cols], use_container_width=True, hide_index=True)
+st.subheader("2. Costo di ogni filtro")
+icols=["Asset","Stoch","Direction","Filter level","Signals","Signals/day",
+       "Base error %","Error15 %","Errors reduced pp","Signals sacrificed",
+       "Signals removed %","pp error reduction / 10% signals lost"]
+st.dataframe(impact[icols].sort_values(["Asset","Stoch","Direction","Filter level"]),
+             use_container_width=True,height=650)
 
-st.download_button(
-    "⬇ Scarica risultati CSV",
-    result.to_csv(index=False).encode("utf-8"),
-    "argo4_lab_results.csv",
-    "text/csv",
-    use_container_width=True,
-)
+st.subheader("3. Candidati con almeno 10 segnali")
+st.dataframe(robust[cols].head(25),use_container_width=True,hide_index=True)
 
-st.caption("Nota: un Win15 positivo significa solo che il prezzo dopo 15 minuti era nella direzione del segnale. "
-           "Non include spread, slippage o costi del broker; questi vanno aggiunti prima di valutare l'operatività reale.")
+st.download_button("⬇ Scarica Test 2 CSV",impact.to_csv(index=False).encode("utf-8"),
+                   "argo4_test2.csv","text/csv",use_container_width=True)
+st.caption("Il test misura direzione a +15/+30m. Spread, slippage, leva e costi non sono inclusi.")
