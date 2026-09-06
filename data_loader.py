@@ -1,37 +1,15 @@
 from __future__ import annotations
-
 import pandas as pd
 import yfinance as yf
-
 
 class MarketDataError(RuntimeError):
     pass
 
-
-def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if isinstance(df.columns, pd.MultiIndex):
-        df = df.copy()
-        df.columns = [
-            col[0] if isinstance(col, tuple) else col
-            for col in df.columns
-        ]
-    return df
-
-
-def download_market_data(
-    ticker: str,
-    period: str = "1y",
-    interval: str = "1d",
-) -> pd.DataFrame:
+def download_market_data(ticker: str, period: str = "5d", interval: str = "15m") -> pd.DataFrame:
     try:
         df = yf.download(
-            ticker,
-            period=period,
-            interval=interval,
-            auto_adjust=True,
-            multi_level_index=False,
-            progress=False,
-            threads=False,
+            ticker, period=period, interval=interval, auto_adjust=True,
+            multi_level_index=False, progress=False, threads=False, prepost=False
         )
     except Exception as exc:
         raise MarketDataError(f"Errore download {ticker}: {exc}") from exc
@@ -39,23 +17,15 @@ def download_market_data(
     if df is None or df.empty:
         raise MarketDataError(f"Nessun dato disponibile per {ticker}")
 
-    df = _flatten_columns(df)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
 
-    required = ["Open", "High", "Low", "Close", "Volume"]
-    missing = [col for col in required if col not in df.columns]
+    needed = ["Open", "High", "Low", "Close"]
+    missing = [c for c in needed if c not in df.columns]
     if missing:
-        raise MarketDataError(
-            f"Colonne mancanti per {ticker}: {', '.join(missing)}"
-        )
+        raise MarketDataError(f"Colonne mancanti per {ticker}: {', '.join(missing)}")
 
-    df = df[required].copy()
-
-    for col in required:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df = df.dropna(subset=["High", "Low", "Close"])
-
-    if df.empty:
-        raise MarketDataError(f"Dati non validi per {ticker}")
-
-    return df
+    df = df.copy()
+    for c in needed:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df.dropna(subset=["High", "Low", "Close"]).sort_index()
