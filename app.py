@@ -1,451 +1,125 @@
 from __future__ import annotations
-
-from datetime import datetime
-
-import pandas as pd
+from datetime import datetime, timezone
 import streamlit as st
 
-from analysis_engine import analyse_asset
-from charts import price_chart, rsi_chart
-from utils import format_report, to_number
-from trade_manager import add_trade, close_trade, load_trades, trade_snapshot, storage_backend
-from config import (
-    APP_ICON,
-    APP_TITLE,
-    DEFAULT_CAPITAL,
-    DEFAULT_INTERVAL,
-    DEFAULT_PERIOD,
-    INTERVAL_OPTIONS,
-    PERIOD_OPTIONS,
-    SUPPORT_RESISTANCE_WINDOW,
-    TOP_CHARTS_DEFAULT,
-    WATCHLIST,
-)
+from config import APP_TITLE, APP_ICON, ASSETS, DATA_PERIOD, DATA_INTERVAL, REFRESH_SECONDS
+from data_loader import download_market_data, MarketDataError
+from signal_engine import evaluate_asset
 
 st.set_page_config(page_title=APP_TITLE, page_icon=APP_ICON, layout="wide")
 
+st.markdown("""
+<style>
+.block-container {max-width: 980px; padding-top: 1.5rem;}
+.signal-card {border:1px solid rgba(128,128,128,.28);border-radius:18px;padding:1.25rem;margin:.4rem 0;}
+.big-signal {font-size:2.4rem;font-weight:800;line-height:1.1;}
+.asset {font-size:1.15rem;font-weight:700;opacity:.8;}
+.small {opacity:.68;font-size:.9rem;}
+</style>
+""", unsafe_allow_html=True)
 
-def _check_app_password() -> bool:
-    """Protezione semplice per evitare che un'app pubblica esponga il Trade Manager."""
-    try:
-        expected = st.secrets.get("ARGO_APP_PASSWORD")
-    except Exception:
-        expected = None
+if "session_active" not in st.session_state:
+    st.session_state.session_active = False
+if "session_started" not in st.session_state:
+    st.session_state.session_started = None
+if "last_signal_key" not in st.session_state:
+    st.session_state.last_signal_key = {}
+if "signal_count" not in st.session_state:
+    st.session_state.signal_count = 0
 
-    if not expected:
-        return True
-
-    if st.session_state.get("argo_authenticated") is True:
-        return True
-
-    st.title("🔐 ARGO AI")
-    password = st.text_input("Password", type="password")
-    if st.button("Accedi", type="primary"):
-        if password == expected:
-            st.session_state["argo_authenticated"] = True
-            st.rerun()
-        else:
-            st.error("Password non corretta.")
-    return False
-
-
-if not _check_app_password():
-    st.stop()
-
-st.markdown(
-    """
-    <style>
-        .block-container {padding-top: 1.4rem; padding-bottom: 3rem;}
-        [data-testid="stMetricValue"] {font-size: 1.55rem;}
-        .argo-hero {padding: 1.15rem 1.25rem; border: 1px solid rgba(128,128,128,.28);
-                    border-radius: 14px; margin: .25rem 0 1.25rem 0;}
-        .argo-hero h2 {margin: 0 0 .35rem 0;}
-        .argo-hero p {margin: .15rem 0; font-size: 1.02rem;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def run_analysis(period: str, interval: str, selected_assets: tuple[str, ...]):
-    summaries, histories, errors = [], {}, []
-
-    for name in selected_assets:
-        try:
-            result = analyse_asset(
-                name=name,
-                ticker=WATCHLIST[name],
-                period=period,
-                interval=interval,
-                support_window=SUPPORT_RESISTANCE_WINDOW,
-            )
-            summaries.append(result.summary)
-            histories[name] = result.history
-        except Exception as exc:
-            errors.append(f"{name}: {exc}")
-
-    report = pd.DataFrame(summaries)
-    if not report.empty:
-        # Compatibilità con dati prodotti da versioni precedenti del motore.
-        # Evita il blocco dell'app durante gli aggiornamenti parziali su GitHub.
-        if "Confidence" not in report.columns:
-            operability = pd.to_numeric(
-                report.get("Operabilità", pd.Series(0, index=report.index)),
-                errors="coerce",
-            ).fillna(0)
-            structure = pd.to_numeric(
-                report.get("Score Struttura", pd.Series(0, index=report.index)),
-                errors="coerce",
-            ).fillna(0)
-            setup = report.get(
-                "Setup", pd.Series("⚪ Nessun setup", index=report.index)
-            ).astype(str)
-            setup_bonus = setup.map({
-                "🟢 Breakout confermato": 24,
-                "🟢 Pullback da monitorare": 16,
-                "🟡 Breakout da verificare": 10,
-                "🟡 Attendere breakout": 6,
-                "🔴 Falso breakout": -20,
-            }).fillna(0)
-            report["Confidence"] = (
-                operability * 0.50 + structure * 0.30 + setup_bonus
-            ).clip(0, 100).round().astype(int)
-
-        if "Stato operativo" not in report.columns:
-            def _fallback_state(row):
-                setup = str(row.get("Setup", ""))
-                confidence = int(row.get("Confidence", 0))
-                if "Falso breakout" in setup:
-                    return "🔴 Setup invalidato"
-                if "Breakout confermato" in setup and confidence >= 80:
-                    return "🟢 Setup confermato"
-                if "Breakout da verificare" in setup or "Pullback" in setup:
-                    return "🟠 Attendere conferma"
-                if "Attendere breakout" in setup or confidence >= 65:
-                    return "🟡 In avvicinamento"
-                return "⚪ Nessuna opportunità"
-            report["Stato operativo"] = report.apply(_fallback_state, axis=1)
-
-        if "Azione" not in report.columns:
-            def _fallback_action(row):
-                state = str(row.get("Stato operativo", ""))
-                confidence = int(row.get("Confidence", 0))
-                if "invalidato" in state.lower():
-                    return "❌ Evita"
-                if "confermato" in state.lower() and confidence >= 85:
-                    return "🚀 Valuta ingresso"
-                if confidence >= 78:
-                    return "🟡 Preparati"
-                if confidence >= 62:
-                    return "⏳ Osserva"
-                return "⚪ Nessuna operazione"
-            report["Azione"] = report.apply(_fallback_action, axis=1)
-
-        sort_columns = [
-            column for column in ["Confidence", "Operabilità", "Score Struttura"]
-            if column in report.columns
-        ]
-        if sort_columns:
-            report = report.sort_values(
-                sort_columns, ascending=[False] * len(sort_columns)
-            ).reset_index(drop=True)
-
-    return report, histories, errors
-
-
-
-def hero_message(report: pd.DataFrame) -> str:
-    confirmed = report[report["Stato operativo"] == "🟢 Setup confermato"]
-    if not confirmed.empty:
-        names = " · ".join(
-            f"{row['Asset']} ({int(row['Confidence'])}/100)"
-            for _, row in confirmed.head(3).iterrows()
-        )
-        return (
-            f"<div class='argo-hero'><h2>🚀 OGGI ARGO DICE</h2>"
-            f"<p><strong>{len(confirmed)} setup operativo/i confermato/i</strong></p>"
-            f"<p>{names}</p></div>"
-        )
-
-    approaching = report[report["Stato operativo"].isin([
-        "🟡 In avvicinamento", "🟠 Attendere conferma"
-    ])]
-    if not approaching.empty:
-        best = approaching.iloc[0]
-        return (
-            "<div class='argo-hero'><h2>👀 OGGI ARGO DICE</h2>"
-            "<p><strong>Nessun setup operativo confermato.</strong></p>"
-            f"<p>Il candidato più vicino è {best['Asset']}: "
-            f"{best['Stato operativo']} · Confidence {int(best['Confidence'])}/100.</p></div>"
-        )
-
-    return (
-        "<div class='argo-hero'><h2>⚪ OGGI ARGO DICE</h2>"
-        "<p><strong>Nessun setup operativo.</strong></p>"
-        "<p>La classifica resta in monitoraggio in attesa di una conferma tecnica.</p></div>"
-    )
-
-
-st.title("🚀 ARGO AI 3.1 · Trade Manager")
-st.caption(
-    "ARGO seleziona i setup, calcola Entry, Stop Loss, TP1, TP2 e rapporto rischio/rendimento. "
-    "Il comando ENTRA appare solo quando tutte le regole tecniche della Beta risultano valide. Le indicazioni sono informative e non sono ordini."
-)
-
-with st.sidebar:
-    st.header("Impostazioni")
-    capital = st.number_input(
-        "Capitale di riferimento (€)",
-        min_value=0.0,
-        value=float(DEFAULT_CAPITAL),
-        step=10.0,
-    )
-    period = st.selectbox(
-        "Periodo storico", PERIOD_OPTIONS,
-        index=PERIOD_OPTIONS.index(DEFAULT_PERIOD),
-    )
-    interval = st.selectbox(
-        "Intervallo", INTERVAL_OPTIONS,
-        index=INTERVAL_OPTIONS.index(DEFAULT_INTERVAL),
-    )
-    selected_assets = st.multiselect(
-        "Asset", options=list(WATCHLIST.keys()), default=list(WATCHLIST.keys())
-    )
-    top_charts = st.slider(
-        "Grafici principali",
-        min_value=1,
-        max_value=min(6, max(1, len(selected_assets))),
-        value=min(TOP_CHARTS_DEFAULT, max(1, len(selected_assets))),
-    )
-    risk_pct = st.number_input(
-        "Rischio massimo per operazione (%)", min_value=0.1, max_value=5.0,
-        value=1.0, step=0.1,
-    )
-    refresh = st.button("🔄 Aggiorna analisi", use_container_width=True, type="primary")
-
-if not selected_assets:
-    st.warning("Seleziona almeno un asset nella barra laterale.")
-    st.stop()
-
-if refresh:
-    st.cache_data.clear()
-
-with st.spinner("ARGO sta scaricando e analizzando i mercati..."):
-    report, histories, errors = run_analysis(
-        period=period,
-        interval=interval,
-        selected_assets=tuple(selected_assets),
-    )
-
-if errors:
-    with st.expander(f"Avvisi durante il download ({len(errors)})"):
-        for error in errors:
-            st.warning(error)
-
-if report.empty:
-    st.error("Non è stato possibile creare il report. Riprova tra qualche minuto.")
-    st.stop()
-
-report_display = format_report(report)
-best = report.iloc[0]
-variation_label = "Var. candela %" if interval == "1h" else "Var. giorno %"
-
-st.markdown(hero_message(report), unsafe_allow_html=True)
-
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Capitale", f"€ {capital:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-col2.metric("Asset analizzati", len(report))
-col3.metric("Migliore Confidence", f"{int(best['Confidence'])}/100")
-col4.metric("Asset in evidenza", best["Asset"])
-
-st.caption("Ultimo aggiornamento app: " + datetime.now().strftime("%d/%m/%Y · %H:%M"))
-
-st.subheader("🏆 Classifica Decision Engine")
-ranking_columns = [
-    "Asset", "Prezzo", "Var. %", "Trend", "Confidence", "Conviction", "IQS", "Azione",
-    "Entry", "Stop Loss", "TP1", "TP2", "R/R TP1", "Stato operativo", "Progresso setup", "Setup",
-]
-ranking = report_display[ranking_columns].rename(columns={"Var. %": variation_label})
-st.dataframe(
-    ranking,
-    use_container_width=True,
-    hide_index=True,
-    column_config={
-        "Prezzo": st.column_config.NumberColumn("Prezzo", format="%.2f"),
-        variation_label: st.column_config.NumberColumn(variation_label, format="%.2f%%"),
-        "Confidence": st.column_config.ProgressColumn(
-            "Confidence", min_value=0, max_value=100, format="%d"
-        ),
-        "Progresso setup": st.column_config.ProgressColumn(
-            "Avanzamento", min_value=0, max_value=100, format="%d%%"
-        ),
-        "Score Struttura": st.column_config.ProgressColumn(
-            "Struttura", min_value=0, max_value=100, format="%d"
-        ),
-        "Operabilità": st.column_config.ProgressColumn(
-            "Operabilità", min_value=0, max_value=100, format="%d"
-        ),
-    },
-)
-
-st.subheader("🎯 Migliore candidato del momento")
-a, b, c, d, e, f = st.columns(6)
-a.metric("Asset", best["Asset"])
-b.metric("Confidence", f"{int(best['Confidence'])}/100")
-c.metric("Classe", best["Classe Confidence"])
-d.metric("Stato", best["Stato operativo"])
-e.metric("Azione", best["Azione"])
-f.metric("IQS", best["IQS"])
+st.title("⚡ ARGO 4.0")
+st.caption("SESSION TRADER · BTC + GBP/USD · M15")
 
 left, right = st.columns(2)
 with left:
-    st.write(f"**Trend:** {best['Trend']}")
-    st.write(f"**Struttura:** {int(best['Score Struttura'])}/100 · {best['Valutazione']}")
-    st.write(f"**Operabilità:** {int(best['Operabilità'])}/100 · {best['Stato operabilità']}")
-    st.write(f"**Setup:** {best['Setup']}")
+    if not st.session_state.session_active:
+        if st.button("▶ AVVIA SESSIONE", type="primary", use_container_width=True):
+            st.session_state.session_active = True
+            st.session_state.session_started = datetime.now(timezone.utc)
+            st.session_state.last_signal_key = {}
+            st.session_state.signal_count = 0
+            st.rerun()
+    else:
+        if st.button("■ TERMINA SESSIONE", use_container_width=True):
+            st.session_state.session_active = False
+            st.rerun()
+
 with right:
-    st.write(f"**RSI:** {best['RSI']:.2f} · {best['Stato RSI']}")
-    st.write(f"**MACD:** {best['Segnale MACD']}")
-    st.write(f"**Volume/Media 20:** {best['Volume/Media']:.2f}x")
-    st.write(f"**Distanza resistenza:** {best['Distanza resistenza %']:.2f}%")
+    status = "🟢 SESSIONE ATTIVA" if st.session_state.session_active else "⚪ ARGO A RIPOSO"
+    st.metric("Stato", status)
 
-st.progress(int(best["Progresso setup"]), text=f"Avanzamento setup: {int(best['Progresso setup'])}%")
-st.info(best["Commento ARGO"])
+if not st.session_state.session_active:
+    st.info("Premi AVVIA SESSIONE. ARGO non analizza i mercati finché la sessione non è attiva.")
+    st.stop()
 
-st.subheader("🧭 Piano operativo")
-if str(best.get("Piano valido", False)).lower() in {"true", "1", "yes"}:
-    p1, p2, p3, p4, p5 = st.columns(5)
-    p1.metric("Entry", f"{best['Entry']:.4f}")
-    p2.metric("Stop Loss", f"{best['Stop Loss']:.4f}")
-    p3.metric("TP1", f"{best['TP1']:.4f}")
-    p4.metric("TP2", f"{best['TP2']:.4f}")
-    p5.metric("R/R TP1", f"{best['R/R TP1']:.2f}")
-    risk_amount = capital * risk_pct / 100
-    risk_per_unit = to_number(best.get("Rischio/unità"), 0.0) or 0.0
-    units = risk_amount / risk_per_unit if risk_per_unit > 0 else 0.0
-    st.success(
-        f"🚀 ENTRA — piano tecnico validato. Con rischio {risk_pct:.1f}% su € {capital:,.2f}, "
-        f"rischio monetario € {risk_amount:,.2f} e quantità teorica {units:.4f} unità."
-    )
-else:
-    st.warning(best.get("Esito piano", "Nessun piano operativo validato."))
-    st.caption("ARGO non mostra ENTRA finché breakout, Confidence, volume, RSI, stop tecnico e R/R non superano tutti i filtri.")
+def seconds_to_next_quarter():
+    now = datetime.now(timezone.utc)
+    elapsed = (now.minute % 15) * 60 + now.second
+    return 15 * 60 - elapsed if elapsed else 15 * 60
 
-st.divider()
-st.subheader("💼 ARGO Trade Manager")
-st.caption("Le operazioni seguite restano separate dallo Scanner: se un asset esce dalla classifica, il trade continua a essere mostrato qui.")
-st.caption(f"Archivio Trade Manager: **{storage_backend()}**")
+@st.fragment(run_every=f"{REFRESH_SECONDS}s")
+def live_session():
+    remaining = seconds_to_next_quarter()
+    mm, ss = divmod(remaining, 60)
 
-open_trades = [t for t in load_trades() if t.get("status") == "OPEN"]
-if open_trades:
-    current_prices = {str(r["Asset"]): float(r["Prezzo"]) for _, r in report.iterrows()}
-    for trade in open_trades:
-        asset = trade["asset"]
-        current = current_prices.get(asset)
-        with st.container(border=True):
-            st.markdown(f"### {asset} · {trade.get('direction', 'LONG')}")
-            if current is None:
-                st.warning("Prezzo corrente non disponibile: includi questo asset nella watchlist per aggiornarne il monitoraggio.")
-                current = float(trade["entry"])
-            snap = trade_snapshot(trade, current)
-            c1,c2,c3,c4,c5 = st.columns(5)
-            c1.metric("Entry", f"{float(trade['entry']):.2f}")
-            c2.metric("Prezzo", f"{current:.2f}", f"{snap['pnl_pct']:+.2f}%")
-            c3.metric("Stop", "—" if trade.get("stop_loss") is None else f"{float(trade['stop_loss']):.2f}")
-            c4.metric("TP1", "—" if trade.get("tp1") is None else f"{float(trade['tp1']):.2f}")
-            c5.metric("TP2", "—" if trade.get("tp2") is None else f"{float(trade['tp2']):.2f}")
-            st.write(f"**{snap['state']}** · {snap['action']}")
-            d=[]
-            if snap['distance_sl'] is not None: d.append(f"SL {snap['distance_sl']:+.2f}%")
-            if snap['distance_tp1'] is not None: d.append(f"TP1 {snap['distance_tp1']:+.2f}%")
-            if snap['distance_tp2'] is not None: d.append(f"TP2 {snap['distance_tp2']:+.2f}%")
-            if d: st.caption("Distanza dal prezzo attuale: " + " · ".join(d))
-            with st.expander("Chiudi operazione"):
-                exit_price = st.number_input("Prezzo di uscita", min_value=0.0001, value=float(current), key=f"exit_{trade['id']}")
-                if st.button("Conferma chiusura", key=f"close_{trade['id']}"):
-                    close_trade(trade["id"], exit_price)
-                    st.rerun()
-else:
-    st.info("Nessuna operazione aperta nel Trade Manager.")
+    a, b, c = st.columns(3)
+    a.metric("Prossima chiusura M15", f"{mm:02d}:{ss:02d}")
+    if st.session_state.session_started:
+        elapsed = datetime.now(timezone.utc) - st.session_state.session_started
+        total = int(elapsed.total_seconds())
+        eh, rem = divmod(total, 3600); em, es = divmod(rem, 60)
+        b.metric("Sessione", f"{eh:02d}:{em:02d}:{es:02d}")
+    c.metric("Segnali sessione", st.session_state.signal_count)
 
-with st.expander("➕ Segui una nuova operazione", expanded=False):
-    asset_options = list(WATCHLIST.keys())
-    default_idx = asset_options.index(str(best["Asset"])) if str(best["Asset"]) in asset_options else 0
-    track_asset = st.selectbox("Asset", asset_options, index=default_idx, key="track_asset")
-    source = report[report["Asset"] == track_asset]
-    source_row = source.iloc[0] if not source.empty else None
-    suggested_entry = to_number(source_row.get("Entry")) if source_row is not None else None
-    if suggested_entry is None and source_row is not None: suggested_entry = to_number(source_row.get("Prezzo"))
-    entry_value = st.number_input("Prezzo effettivo di ingresso", min_value=0.0001, value=float(suggested_entry or 1.0), format="%.4f")
-    m1,m2,m3 = st.columns(3)
-    with m1:
-        sl_value = st.number_input("Stop Loss (0 = non impostato)", min_value=0.0, value=float(to_number(source_row.get("Stop Loss"),0.0) if source_row is not None else 0.0), format="%.4f")
-    with m2:
-        tp1_value = st.number_input("TP1 (0 = non impostato)", min_value=0.0, value=float(to_number(source_row.get("TP1"),0.0) if source_row is not None else 0.0), format="%.4f")
-    with m3:
-        tp2_value = st.number_input("TP2 (0 = non impostato)", min_value=0.0, value=float(to_number(source_row.get("TP2"),0.0) if source_row is not None else 0.0), format="%.4f")
-    setup_value = str(source_row.get("Setup", "Inserimento manuale")) if source_row is not None else "Inserimento manuale"
-    if st.button("📌 Segui operazione", type="primary"):
-        add_trade(asset=track_asset, ticker=WATCHLIST[track_asset], entry=entry_value,
-                  stop_loss=sl_value or None, tp1=tp1_value or None, tp2=tp2_value or None,
-                  setup=setup_value)
-        st.success(f"{track_asset} aggiunto al Trade Manager.")
-        st.rerun()
+    results = []
+    for asset, cfg in ASSETS.items():
+        try:
+            df = download_market_data(cfg["ticker"], DATA_PERIOD, DATA_INTERVAL)
+            result = evaluate_asset(asset, df, cfg)
+        except MarketDataError as exc:
+            result = None
+            st.error(f"{asset}: {exc}")
+        except Exception as exc:
+            result = None
+            st.error(f"{asset}: errore analisi — {exc}")
+        results.append((asset, cfg, result))
 
-closed_trades = [t for t in load_trades() if t.get("status") == "CLOSED"]
-if closed_trades:
-    with st.expander(f"📚 Storico operazioni ({len(closed_trades)})"):
-        history_rows=[]
-        for t in reversed(closed_trades):
-            entry=float(t['entry']); exit_p=float(t.get('exit_price') or entry)
-            history_rows.append({"Asset":t['asset'],"Apertura":t.get('opened_at'),"Chiusura":t.get('closed_at'),
-                                 "Entry":entry,"Exit":exit_p,"P/L %":round((exit_p/entry-1)*100,2),"Setup":t.get('setup','')})
-        st.dataframe(pd.DataFrame(history_rows), use_container_width=True, hide_index=True)
+    cols = st.columns(2)
+    for col, (asset, cfg, result) in zip(cols, results):
+        with col:
+            if result is None:
+                st.markdown(f"<div class='signal-card'><div class='asset'>{asset}</div><div class='big-signal'>⚠️ DATA</div></div>", unsafe_allow_html=True)
+                continue
 
-st.subheader("📈 Grafici principali")
-for _, row in report.head(top_charts).iterrows():
-    name = row["Asset"]
-    with st.expander(
-        f"{name} · Confidence {int(row['Confidence'])}/100 · {row['Azione']}",
-        expanded=(name == best["Asset"]),
-    ):
-        st.write(f"**{row['Stato operativo']} · {row['Setup']}**")
-        st.progress(int(row["Progresso setup"]), text=f"Avanzamento setup: {int(row['Progresso setup'])}%")
-        st.info(row["Commento ARGO"])
-        st.plotly_chart(
-            price_chart(
-                data=histories[name],
-                asset_name=name,
-                score=int(row["Score Struttura"]),
-                support=float(row["Supporto"]),
-                resistance=float(row["Resistenza"]),
-                entry=to_number(row.get("Entry")),
-                stop_loss=to_number(row.get("Stop Loss")),
-                tp1=to_number(row.get("TP1")),
-                tp2=to_number(row.get("TP2")),
-            ),
-            use_container_width=True,
-        )
-        st.plotly_chart(
-            rsi_chart(data=histories[name], asset_name=name),
-            use_container_width=True,
-        )
+            icon = {"BUY":"🟢", "SELL":"🔴", "WAIT":"⚪"}[result.signal]
+            label = result.signal
 
-st.subheader("📋 Report completo")
-st.dataframe(report_display, use_container_width=True, hide_index=True)
+            # Count each candle/direction only once during this Streamlit session.
+            if result.signal in ("BUY","SELL") and result.candle_time is not None:
+                key = f"{result.candle_time}|{result.signal}"
+                if st.session_state.last_signal_key.get(asset) != key:
+                    st.session_state.last_signal_key[asset] = key
+                    st.session_state.signal_count += 1
 
-csv_data = report_display.to_csv(index=False).encode("utf-8-sig")
-st.download_button(
-    "⬇️ Scarica report CSV",
-    data=csv_data,
-    file_name="report_argo_3_1.csv",
-    mime="text/csv",
-)
+            candle = str(result.candle_time) if result.candle_time is not None else "—"
+            kd = f"K {result.k:.1f} · D {result.d:.1f}" if result.k is not None else "In attesa"
 
-st.divider()
-st.caption(
-    "ARGO AI è uno strumento informativo e sperimentale. I dati possono essere "
-    "ritardati o differire dalle quotazioni del broker. I CFD comportano un rischio "
-    "elevato di perdita, soprattutto con leva."
+            st.markdown(
+                f"<div class='signal-card'>"
+                f"<div class='asset'>{asset}</div>"
+                f"<div class='big-signal'>{icon} {label}</div>"
+                f"<div>{kd}</div>"
+                f"<div class='small'>{result.reason}</div>"
+                f"<div class='small'>Ultima candela valutata: {candle}</div>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+
+    st.caption("ARGO genera solo la direzione. Apertura, dimensione e chiusura della posizione restano manuali.")
+
+live_session()
+
+st.warning(
+    "Feed dati: questa build usa Yahoo Finance/yfinance. È adatta al collaudo del motore, "
+    "ma non va considerata un feed XTB garantito in tempo reale o sincronizzato al tick."
 )
